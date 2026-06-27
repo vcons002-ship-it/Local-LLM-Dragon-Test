@@ -151,6 +151,7 @@ function main() {
 
   const hornMat = new THREE.MeshPhysicalMaterial({
     color: 0x2b2420, roughness: 0.34, metalness: 0, clearcoat: 0.6, clearcoatRoughness: 0.25, sheen: 0.1,
+    side: THREE.DoubleSide,   // horns & wing bones are open swept tubes
   });
   const clawMat = hornMat;
   const membraneMat = new THREE.MeshPhysicalMaterial({
@@ -360,6 +361,11 @@ function makeSkinMaterial(tex, repX, repY) {
     roughness: 1, metalness: 0, normalScale: new THREE.Vector2(0.6, 0.6),
     clearcoat: 0.45, clearcoatRoughness: 0.3, sheen: 0.25, sheenColor: new THREE.Color(0x223322),
     sheenRoughness: 0.6, envMapIntensity: 0.95, emissive: new THREE.Color(0x0c0602), emissiveIntensity: 0.4,
+    // Body/limbs/head are single-walled swept tubes with open ends. Render both
+    // sides so the surface is always solid — some mobile GPUs flip the face
+    // winding (culling the near surface and revealing the hollow interior),
+    // which looks like "seeing inside the body".
+    side: THREE.DoubleSide,
   });
 }
 
