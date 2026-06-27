@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>3D Dragon</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { overflow: hidden; background: #000; }
+canvas { display: block; }
+#info {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  color: #fff; font-family: monospace; font-size: 13px;
+  background: rgba(0,0,0,0.5); padding: 6px 14px; border-radius: 6px;
+  pointer-events: none;
+}
+</style>
+</head>
+<body>
+<div id="info">🐉 3D Dragon — Scroll to zoom · Drag to orbit</div>
+
+<!-- Three.js + OrbitControls from CDN -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Scene, Camera, Renderer ─────────────────────────────── */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a0a2e);
+scene.fog = new THREE.FogExp2(0x1a0a2e, 0.018);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(12, 8, 18);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 3, 0);
+
+/* ── Lights ──────────────────────────────────────────────── */
+scene.add(new THREE.AmbientLight(0x404060, 0.8));
+
+const sun = new THREE.DirectionalLight(0xffeedd, 1.5);
+sun.position.set(10, 20, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+scene.add(sun);
+
+const rim = new THREE.PointLight(0x4488ff, 2, 40);
+rim.position.set(-8, 6, -6);
+scene.add(rim);
+
+/* ── Ground ──────────────────────────────────────────────── */
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(80, 80),
+  new THREE.MeshStandardMaterial({ color: 0x1a2a1a, roughness: 0.95 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.5;
+ground.receiveShadow = true;
+scene.add(ground);
+
+/* ── Materials ───────────────────────────────────────────── */
+const bodyMat  = new THREE.MeshStandardMaterial({ color: 0x2d8a4e, roughness: 0.4, metalness: 0.15 });
+const bellyMat = new THREE.MeshStandardMaterial({ color: 0xd4b96a, roughness: 0.6 });
+const wingMem  = new THREE.MeshStandardMaterial({ color: 0x8a2233, roughness: 0.5, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
+const hornMat  = new THREE.MeshStandardMaterial({ color: 0xd4a050, roughness: 0.3, metalness: 0.2 });
+const eyeMat   = new THREE.MeshStandardMaterial({ color: 0xffcc00, emissive: 0xffaa00, emissiveIntensity: 1.2 });
+const pupilMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+
+/* ── Dragon Group ────────────────────────────────────────── */
+const dragon = new THREE.Group();
+scene.add(dragon);
+
+/* Helper: capsule-ish segment (sphere + cylinder) */
+function makeSegment(radiusTop, radiusBot, height, mat) {
+  const g = new THREE.Group();
+  const cyl = new THREE.Mesh(new THREE.CylinderGeometry(radiusTop, radiusBot, height, 12, 4), mat);
+  cyl.castShadow = true;
+  g.add(cyl);
+  // top cap sphere
+  const s1 = new THREE.Mesh(new THREE.SphereGeometry(Math.max(radiusTop, 0.01), 12, 8), mat);
+  s1.position.y = height / 2;
+  s1.castShadow = true;
+  g.add(s1);
+  // bottom cap sphere
+  const s2 = new THREE.Mesh(new THREE.SphereGeometry(Math.max(radiusBot, 0.01), 12, 8), mat);
+  s2.position.y = -height / 2;
+  s2.castShadow = true;
+  g.add(s2);
+  return g;
+}
+
+/* ── Body (stacked segments) ─────────────────────────────── */
+const bodyGroup = new THREE.Group();
+dragon.add(bodyGroup);
+
+const segs = [
+  { rt: 1.3, rb: 1.5, h: 2.0 },   // base (near tail)
+  { rt: 1.5, rb: 1.4, h: 1.6 },
+  { rt: 1.4, rb: 1.2, h: 1.4 },
+  { rt: 1.2, rb: 0.9, h: 1.2 },   // front (near neck)
+];
+
+let bodyY = 3;
+segs.forEach(s => {
+  const seg = makeSegment(s.rt, s.rb, s.h, bodyMat);
+  seg.position.y = bodyY;
+  bodyGroup.add(seg);
+
+  // belly strip
+  const belly = new THREE.Mesh(
+    new THREE.CylinderGeometry(s.rt * 0.55, s.rb * 0.55, s.h * 0.95, 8, 2, false, -Math.PI * 0.35, Math.PI * 0.7),
+    bellyMat
+  );
+  belly.position.y = bodyY;
+  belly.rotation.x = Math.PI / 2;
+  bodyGroup.add(belly);
+
+  bodyY += s.h + 0.1;
+});
+
+/* ── Neck (curved) ──────────────────────────────────────── */
+const neckGroup = new THREE.Group();
+neckGroup.position.set(0, bodyY, -0.5);
+dragon.add(neckGroup);
+
+for (let i = 0; i < 5; i++) {
+  const r = 0.8 - i * 0.06;
+  const seg = makeSegment(r, r + 0.04, 0.7, bodyMat);
+  seg.position.set(0, i * 0.65, -i * 0.25);
+  neckGroup.add(seg);
+}
+
+/* ── Head ────────────────────────────────────────────────── */
+const headGroup = new THREE.Group();
+headGroup.position.set(0, 3.4, -1.7);
+dragon.add(headGroup);
+
+// skull
+const skull = new THREE.Mesh(new THREE.SphereGeometry(0.9, 14, 10), bodyMat);
+skull.scale.set(1, 0.85, 1.2);
+skull.castShadow = true;
+headGroup.add(skull);
+
+// snout
+const snout = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1.4, 8), bodyMat);
+snout.rotation.x = Math.PI / 2;
+snout.position.z = -1.0;
+snout.castShadow = true;
+headGroup.add(snout);
+
+// jaw (lower)
+const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.25, 1.0), bodyMat);
+jaw.position.set(0, -0.35, -0.5);
+jaw.castShadow = true;
+headGroup.add(jaw);
+
+// eyes
+[-1, 1].forEach(side => {
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 6), eyeMat);
+  eye.position.set(side * 0.55, 0.2, -0.4);
+  headGroup.add(eye);
+
+  const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 4), pupilMat);
+  pupil.position.set(side * 0.55, 0.2, -0.58);
+  headGroup.add(pupil);
+
+  // eyebrow ridge
+  const brow = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.08, 0.15), bodyMat);
+  brow.position.set(side * 0.55, 0.42, -0.38);
+  headGroup.add(brow);
+});
+
+// horns
+[-1, 1].forEach(side => {
+  const horn = new THREE.Mesh(new THREE.ConeGeometry(0.12, 1.2, 6), hornMat);
+  horn.position.set(side * 0.5, 0.8, 0.1);
+  horn.rotation.z = side * -0.3;
+  horn.castShadow = true;
+  headGroup.add(horn);
+
+  // secondary smaller horn
+  const horn2 = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.7, 6), hornMat);
+  horn2.position.set(side * 0.35, 0.7, -0.4);
+  horn2.rotation.z = side * -0.15;
+  headGroup.add(horn2);
+});
+
+// nostrils
+[-1, 1].forEach(side => {
+  const n = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 4), pupilMat);
+  n.position.set(side * 0.15, -0.05, -1.7);
+  headGroup.add(n);
+});
+
+/* ── Wings ───────────────────────────────────────────────── */
+[-1, 1].forEach(side => {
+  const wingPivot = new THREE.Group();
+  wingPivot.position.set(side * 1.4, 5.5, -0.5);
+  dragon.add(wingPivot);
+
+  // arm bone
+  const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.08, 3, 6), bodyMat);
+  arm.position.y = 1.5;
+  arm.castShadow = true;
+  wingPivot.add(arm);
+
+  // membrane (triangle-ish)
+  const memShape = new THREE.Shape();
+  memShape.moveTo(0, 3);
+  memShape.lineTo(side * 4, 1.5);
+  memShape.lineTo(side * 2.5, -0.5);
+  memShape.lineTo(0, 0);
+  memShape.closePath();
+
+  const wingMesh = new THREE.Mesh(
+    new THREE.ShapeGeometry(memShape),
+    wingMem
+  );
+  wingMesh.position.set(0, 1.5, 0);
+  wingMesh.castShadow = true;
+  wingPivot.add(wingMesh);
+
+  // finger bones
+  for (let f = 0; f < 3; f++) {
+    const fb = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.02, 1.5, 4), hornMat);
+    fb.position.set(side * (1 + f * 0.8), 1.5 + f * 0.3, 0);
+    fb.rotation.z = side * (0.4 + f * 0.2);
+    wingPivot.add(fb);
+  }
+
+  // store ref for animation
+  wingPivot.userData.side = side;
+  if (!dragon.userData.wings) dragon.userData.wings = [];
+  dragon.userData.wings.push(wingPivot);
+});
+
+/* ── Tail ────────────────────────────────────────────────── */
+const tailGroup = new THREE.Group();
+tailGroup.position.set(0, 3, 1.5);
+dragon.add(tailGroup);
+
+let tailX = 0;
+for (let i = 0; i < 8; i++) {
+  const r = 0.6 - i * 0.06;
+  const seg = makeSegment(r, r + 0.02, 1.0, bodyMat);
+  tailX += 0.5;
+  seg.position.set(0, -i * 0.15, tailX);
+  seg.rotation.x = -0.15 * (i / 7);
+  seg.castShadow = true;
+  tailGroup.add(seg);
+}
+
+// tail spike
+const spike = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.8, 6), hornMat);
+spike.position.set(0, -0.9, tailX + 0.3);
+spike.rotation.x = -Math.PI / 2;
+spike.castShadow = true;
+tailGroup.add(spike);
+
+/* ── Legs ────────────────────────────────────────────────── */
+const legPositions = [
+  { x: -1.2, y: 3.5, z: -1.0, side: -1 },  // front left
+  { x:  1.2, y: 3.5, z: -1.0, side:  1 },  // front right
+  { x: -1.2, y: 3.5, z:  1.2, side: -1 },  // back left
+  { x:  1.2, y: 3.5, z:  1.2, side:  1 },  // back right
+];
+
+const legs = [];
+legPositions.forEach(lp => {
+  const legPivot = new THREE.Group();
+  legPivot.position.set(lp.x, lp.y, lp.z);
+  dragon.add(legPivot);
+
+  // upper leg
+  const upper = makeSegment(0.35, 0.28, 1.4, bodyMat);
+  upper.position.y = -0.7;
+  legPivot.add(upper);
+
+  // lower leg
+  const lower = makeSegment(0.28, 0.2, 1.2, bodyMat);
+  lower.position.set(lp.side * 0.15, -1.6, lp.side * 0.2);
+  legPivot.add(lower);
+
+  // foot / claws
+  const foot = new THREE.Mesh(new THREE.SphereGeometry(0.25, 8, 6), bodyMat);
+  foot.position.set(lp.side * 0.2, -2.3, lp.side * 0.3);
+  foot.castShadow = true;
+  legPivot.add(foot);
+
+  // claws
+  for (let c = 0; c < 3; c++) {
+    const claw = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.25, 4), hornMat);
+    claw.position.set(lp.side * 0.2 + (c - 1) * 0.12, -2.45, lp.side * 0.35);
+    claw.rotation.x = Math.PI / 2;
+    legPivot.add(claw);
+  }
+
+  legs.push(legPivot);
+});
+
+/* ── Spines along back ───────────────────────────────────── */
+for (let i = 0; i < 10; i++) {
+  const spine = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.5 + Math.random() * 0.3, 5), hornMat);
+  spine.position.set(0, 3 + i * 0.7, 1.2 - i * 0.45);
+  spine.rotation.x = -0.3;
+  dragon.add(spine);
+}
+
+/* ── Fire Particles ──────────────────────────────────────── */
+const fireParticles = [];
+const fireGeo = new THREE.SphereGeometry(0.12, 6, 4);
+const fireMats = [
+  new THREE.MeshBasicMaterial({ color: 0xff4400 }),
+  new THREE.MeshBasicMaterial({ color: 0xff8800 }),
+  new THREE.MeshBasicMaterial({ color: 0xffcc00 }),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 }),
+];
+
+function emitFire(count) {
+  for (let i = 0; i < count; i++) {
+    const mat = fireMats[Math.floor(Math.random() * fireMats.length)];
+    const p = new THREE.Mesh(fireGeo, mat);
+    // start at mouth position (world space)
+    const mouthWorld = new THREE.Vector3(0, -0.15, -2.4);
+    headGroup.localToWorld(mouthWorld);
+    p.position.copy(mouthWorld);
+    p.userData.velocity = new THREE.Vector3(
+      (Math.random() - 0.5) * 0.3,
+      (Math.random() - 0.5) * 0.2 + 0.1,
+      -Math.random() * 0.6 - 0.3
+    );
+    p.userData.life = 1.0;
+    p.scale.setScalar(0.5 + Math.random());
+    scene.add(p);
+    fireParticles.push(p);
+  }
+}
+
+function updateFire(dt) {
+  for (let i = fireParticles.length - 1; i >= 0; i--) {
+    const p = fireParticles[i];
+    p.userData.life -= dt * 1.2;
+    p.position.addScaledVector(p.userData.velocity, dt);
+    p.userData.velocity.y += dt * 0.5; // rise
+    p.scale.multiplyScalar(0.97);
+
+    if (p.userData.life <= 0) {
+      scene.remove(p);
+      fireParticles.splice(i, 1);
+    }
+  }
+}
+
+/* ── Ambient particles (embers / sparks floating around) ─── */
+const sparkGeo = new THREE.BufferGeometry();
+const sparkCount = 200;
+const sparkPos = new Float32Array(sparkCount * 3);
+for (let i = 0; i < sparkCount; i++) {
+  sparkPos[i * 3]     = (Math.random() - 0.5) * 40;
+  sparkPos[i * 3 + 1] = Math.random() * 15;
+  sparkPos[i * 3 + 2] = (Math.random() - 0.5) * 40;
+}
+sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3));
+const sparkMat = new THREE.PointsMaterial({ color: 0xff6622, size: 0.15, transparent: true, opacity: 0.6 });
+const sparks = new THREE.Points(sparkGeo, sparkMat);
+scene.add(sparks);
+
+/* ── Rocks & environment detail ──────────────────────────── */
+for (let i = 0; i < 15; i++) {
+  const rock = new THREE.Mesh(
+    new THREE.DodecahedronGeometry(0.3 + Math.random() * 0.8, 1),
+    new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.9 })
+  );
+  rock.position.set((Math.random() - 0.5) * 30, -0.3, (Math.random() - 0.5) * 30);
+  rock.rotation.set(Math.random(), Math.random(), Math.random());
+  rock.castShadow = true;
+  rock.receiveShadow = true;
+  scene.add(rock);
+}
+
+/* ── Animation State ─────────────────────────────────────── */
+let time = 0;
+let fireTimer = 0;
+const FIRE_INTERVAL = 3.5; // seconds between breaths
+
+/* ── Main Loop ───────────────────────────────────────────── */
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = 1 / 60;
+  time += dt;
+
+  /* Breathing — subtle scale pulse on body */
+  const breathe = 1 + Math.sin(time * 2) * 0.02;
+  bodyGroup.scale.set(breathe, 1, breathe);
+
+  /* Head bob */
+  headGroup.rotation.x = Math.sin(time * 1.5) * 0.08;
+  headGroup.rotation.y = Math.sin(time * 0.7) * 0.12;
+  neckGroup.rotation.x = Math.sin(time * 1.5) * 0.05;
+
+  /* Wing flap */
+  if (dragon.userData.wings) {
+    dragon.userData.wings.forEach(w => {
+      const flapAngle = Math.sin(time * 2.5) * 0.4 - 0.3;
+      w.rotation.x = flapAngle;
+      w.rotation.z = Math.sin(time * 1.2 + w.userData.side) * 0.08;
+    });
+  }
+
+  /* Tail sway */
+  tailGroup.children.forEach((seg, i) => {
+    if (i < tailGroup.children.length - 1) { // not the spike
+      seg.rotation.y = Math.sin(time * 2 + i * 0.5) * 0.12;
+    }
+  });
+
+  /* Legs shift subtly */
+  legs.forEach((leg, i) => {
+    const phase = i % 2 === 0 ? 0 : Math.PI;
+    leg.rotation.x = Math.sin(time * 1.5 + phase) * 0.06;
+    leg.rotation.z = Math.sin(time * 1.2 + phase) * 0.03;
+  });
+
+  /* Fire breathing */
+  fireTimer += dt;
+  if (fireTimer >= FIRE_INTERVAL) {
+    fireTimer = 0;
+    emitFire(40);
+  }
+  updateFire(dt);
+
+  /* Eye glow pulse */
+  eyeMat.emissiveIntensity = 1 + Math.sin(time * 3) * 0.5;
+
+  /* Spark drift */
+  const sPos = sparks.geometry.attributes.position.array;
+  for (let i = 0; i < sparkCount; i++) {
+    sPos[i * 3 + 1] += dt * 0.3; // rise
+    if (sPos[i * 3 + 1] > 15) sPos[i * 3 + 1] = 0;
+    sPos[i * 3] += Math.sin(time + i) * dt * 0.1;
+  }
+  sparks.geometry.attributes.position.needsUpdate = true;
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+animate();
+
+/* ── Resize ──────────────────────────────────────────────── */
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
