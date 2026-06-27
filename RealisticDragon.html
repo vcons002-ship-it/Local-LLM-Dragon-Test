@@ -30,17 +30,10 @@
     padding: 2rem; background: #0b0e14;
   }
 </style>
-<!-- Fallback: if the module never boots (CDN blocked, etc.) reveal an error. -->
-<script>
-  window.__dragonStarted = false;
-  setTimeout(function () {
-    if (!window.__dragonStarted) {
-      var e = document.getElementById('err');
-      if (e) { e.style.display = 'grid';
-        e.textContent = 'Could not load the 3D libraries (three.js) from the CDN. Check your internet connection and reload.'; }
-    }
-  }, 8000);
-</script>
+<!-- es-module-shims polyfills <script type="importmap"> on browsers that lack
+     native support (notably older mobile Safari < 16.4 / older Android). On
+     modern browsers it detects native support and stays out of the way. -->
+<script async src="https://cdn.jsdelivr.net/npm/es-module-shims@1.10.0/dist/es-module-shims.js" crossorigin="anonymous"></script>
 <script type="importmap">
 {
   "imports": {
@@ -59,12 +52,13 @@
 <div id="err">Loading…</div>
 
 <script type="module">
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+// Loaded dynamically in boot() so import failures (e.g. an unsupported import
+// map on an old browser, or a blocked CDN) are catchable instead of silently
+// aborting the whole module.
+let THREE, OrbitControls, RoomEnvironment;
 
 const errEl = document.getElementById('err');
-function fail(msg) { errEl.style.display = 'grid'; errEl.textContent = 'Could not render the dragon: ' + msg; }
+function fail(msg) { errEl.style.display = 'grid'; errEl.textContent = msg; }
 
 /* ── tiny math helpers ─────────────────────────────────────── */
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
@@ -81,12 +75,12 @@ function profileAt(keys, s) {                       // piecewise smooth interpol
   return keys[keys.length - 1][1];
 }
 
-/* WebGL availability check before we touch three. */
-try {
-  const c = document.createElement('canvas');
-  if (!(window.WebGLRenderingContext && (c.getContext('webgl2') || c.getContext('webgl'))))
-    throw new Error('WebGL is not available in this browser.');
-} catch (e) { fail(e.message || e); throw e; }
+function webglAvailable() {
+  try {
+    const c = document.createElement('canvas');
+    return !!(window.WebGLRenderingContext && (c.getContext('webgl2') || c.getContext('webgl')));
+  } catch (e) { return false; }
+}
 
 let renderer, scene, camera, controls, clock;
 let dragon, bodyMesh, headPivot, neckPivot, jawPivot, eyeMats = [];
@@ -99,7 +93,8 @@ const fireState = { on: false, power: 0, timer: 0 };
    MAIN
    ════════════════════════════════════════════════════════════ */
 function main() {
-  window.__dragonStarted = true;
+  errEl.style.display = 'none';   // ensure any earlier overlay is cleared
+  _wpos = new THREE.Vector3(); _wdir = new THREE.Vector3(); _q = new THREE.Quaternion();
 
   renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -907,7 +902,7 @@ function updateFire(dt) {
 /* ════════════════════════════════════════════════════════════
    ANIMATION
    ════════════════════════════════════════════════════════════ */
-const _wpos = new THREE.Vector3(), _wdir = new THREE.Vector3(), _q = new THREE.Quaternion();
+let _wpos, _wdir, _q;   // reusable scratch (initialized in main, once THREE is loaded)
 function tick() {
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.getElapsedTime();
@@ -961,8 +956,22 @@ function tick() {
   renderer.render(scene, camera);
 }
 
-/* boot (after all declarations are initialized) */
-try { main(); } catch (e) { console.error(e); fail(e.message || e); }
+/* boot: dynamically load three.js (so failures are catchable), then run.
+   No fixed timeout — a slow mobile connection waits for the real result
+   instead of being falsely reported as an error. */
+(async function boot() {
+  try {
+    THREE = await import('three');
+    ({ OrbitControls } = await import('three/addons/controls/OrbitControls.js'));
+    ({ RoomEnvironment } = await import('three/addons/environments/RoomEnvironment.js'));
+  } catch (e) {
+    console.error(e);
+    fail('Could not load the 3D library (three.js) from the CDN. Check your internet connection and reload. [' + (e.message || e) + ']');
+    return;
+  }
+  if (!webglAvailable()) { fail('WebGL is not available in this browser.'); return; }
+  try { main(); } catch (e) { console.error(e); fail('Could not render the dragon: ' + (e.message || e)); }
+})();
 </script>
 </body>
 </html>
