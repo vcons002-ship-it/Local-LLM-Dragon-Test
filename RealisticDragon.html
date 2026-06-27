@@ -93,7 +93,7 @@ let dragon, bodyMesh, headPivot, neckPivot, jawPivot, eyeMats = [];
 let wings = [], legs = [], spikes, mouthLight, fire;
 const bodyUniforms = { uTime: { value: 0 }, uBreath: { value: 0 } };
 let autoRotate = true;
-const fireState = { on: false, power: 0 };
+const fireState = { on: false, power: 0, timer: 0 };
 
 /* ════════════════════════════════════════════════════════════
    MAIN
@@ -147,12 +147,11 @@ function main() {
 
   /* ── textures ── */
   const aniso = maxAniso;
-  const bodyTex = makeScaleTextures({ belly: true, aniso });
-  const skinTex = makeScaleTextures({ belly: false, aniso });
+  const scaleTex = makeScaleTextures(aniso);
   const groundTex = makeGroundTextures(aniso);
 
   /* ── materials ── */
-  const bodyMat = makeSkinMaterial(bodyTex, 1, 1);
+  const bodyMat = makeSkinMaterial({ map: scaleTex.bellyMap, normal: scaleTex.normal, rough: scaleTex.rough }, 1, 1);
   bodyMat.onBeforeCompile = injectBodyShader;
 
   const hornMat = new THREE.MeshPhysicalMaterial({
@@ -173,7 +172,7 @@ function main() {
 
   const spine = buildSpine();
   buildBody(spine, bodyMat);
-  const skinFactory = (rep) => makeSkinMaterial(skinTex, rep, rep);
+  const skinFactory = (rep) => makeSkinMaterial({ map: scaleTex.plainMap, normal: scaleTex.normal, rough: scaleTex.rough }, rep, rep);
   buildLegs(spine, skinFactory(2.2), clawMat);
   buildWings(spine, skinFactory(2.2), membraneMat, hornMat);
   buildSpikes(spine, hornMat);
@@ -205,17 +204,22 @@ function main() {
   /* ── UI ── */
   document.getElementById('fireBtn').addEventListener('click', () => triggerFire());
   document.getElementById('rotChk').addEventListener('change', e => { controls.autoRotate = e.target.checked; });
-  addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); triggerFire(); } });
-  addEventListener('resize', onResize);
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) clock.stop(); else clock.start();
+  // Space breathes fire, but don't hijack it from focused form controls/buttons.
+  addEventListener('keydown', e => {
+    if (e.code === 'Space' && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLButtonElement)) {
+      e.preventDefault(); triggerFire();
+    }
   });
+  addEventListener('resize', onResize);
+  // No visibilitychange clock.stop/start: requestAnimationFrame already pauses
+  // tick() while hidden, and the dt clamp absorbs the one large resume delta —
+  // calling clock.start() here would zero elapsedTime and snap every animation.
 
   clock = new THREE.Clock();
   renderer.setAnimationLoop(tick);
 }
 
-function triggerFire() { fireState.on = true; fireState.until = (clock ? clock.getElapsedTime() : 0) + 2.2; }
+function triggerFire() { fireState.on = true; fireState.timer = 2.2; }   // relative countdown (clock-reset-proof)
 
 function onResize() {
   camera.aspect = innerWidth / innerHeight;
@@ -275,8 +279,19 @@ function sweepGeometry(curve, steps, radial, profileFn, opts = {}) {
   g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   g.setIndex(idx);
   g.computeVertexNormals();
+  // weld the radial seam: columns 0 and `radial` are coincident but distinct
+  // vertices (UVs must stay 0 and 1), so average their normals for continuous shading.
+  {
+    const nor = g.attributes.normal;
+    for (let i = 0; i <= steps; i++) {
+      const a = i * cols, b = i * cols + radial;
+      const nx = nor.getX(a) + nor.getX(b), ny = nor.getY(a) + nor.getY(b), nz = nor.getZ(a) + nor.getZ(b);
+      const l = Math.hypot(nx, ny, nz) || 1;
+      nor.setXYZ(a, nx / l, ny / l, nz / l); nor.setXYZ(b, nx / l, ny / l, nz / l);
+    }
+    nor.needsUpdate = true;
+  }
   if (opts.attrs) g.setAttribute('aU', new THREE.Float32BufferAttribute(aU, 1));
-  if (opts.uv2) g.setAttribute('uv2', new THREE.Float32BufferAttribute(uv.slice(), 2));
   if (opts.tangents) g.computeTangents();
   return g;
 }
@@ -310,7 +325,7 @@ function bodyProfile(s, theta) {
 }
 
 function buildBody(spine, mat) {
-  const g = sweepGeometry(spine, 240, 32, bodyProfile, { attrs: true, uv2: true, tangents: true, vTile: spine.getLength() / 26 });
+  const g = sweepGeometry(spine, 240, 32, bodyProfile, { attrs: true, tangents: true, vTile: spine.getLength() / 26 });
   bodyMesh = new THREE.Mesh(g, mat);
   bodyMesh.castShadow = true;
   bodyMesh.receiveShadow = true;
@@ -353,69 +368,60 @@ function makeSkinMaterial(tex, repX, repY) {
   });
 }
 
-function makeScaleTextures({ belly, aniso }) {
-  const W = 1024, H = 2048;
-  const alb = document.createElement('canvas'); alb.width = W; alb.height = H;
-  const hgt = document.createElement('canvas'); hgt.width = W; hgt.height = H;
-  const rgh = document.createElement('canvas'); rgh.width = W; rgh.height = H;
-  const ca = alb.getContext('2d'), ch = hgt.getContext('2d'), cr = rgh.getContext('2d');
+// Generate the scale texture set ONCE: two albedos (belly-graded + plain) that
+// share a single height-derived normal map and roughness map. This avoids a
+// second multi-megapixel normalFromHeight pass at boot.
+function makeScaleTextures(aniso) {
+  const W = 1024, H = 1024;                 // tiled (RepeatWrapping) → 1024 is ample
+  const mk = () => { const c = document.createElement('canvas'); c.width = W; c.height = H; return c; };
+  const albB = mk(), albP = mk(), hgt = mk(), rgh = mk();
+  const cB = albB.getContext('2d'), cP = albP.getContext('2d'), ch = hgt.getContext('2d'), cr = rgh.getContext('2d');
 
-  // base colour: edges (x=0/W) belly, centre (x=W/2) dorsal back
   const dorsal = [34, 74, 46], dorsalDark = [20, 44, 28], bellyCol = [200, 178, 120];
+  const colAt = (dn, belly) => belly
+    ? [lerp(lerp(bellyCol[0], dorsal[0], smoothstep(0.12, 0.55, dn)), dorsalDark[0], dn * 0.3),
+       lerp(lerp(bellyCol[1], dorsal[1], smoothstep(0.12, 0.55, dn)), dorsalDark[1], dn * 0.3),
+       lerp(lerp(bellyCol[2], dorsal[2], smoothstep(0.12, 0.55, dn)), dorsalDark[2], dn * 0.3)]
+    : [lerp(dorsal[0], dorsalDark[0], 1 - dn), lerp(dorsal[1], dorsalDark[1], 1 - dn), lerp(dorsal[2], dorsalDark[2], 1 - dn)];
+
   for (let x = 0; x < W; x++) {
-    const nx = x / W;
-    const dorsalness = Math.sin(nx * Math.PI);              // 0 at edges, 1 at centre
-    let col;
-    if (belly) {
-      const t = smoothstep(0.12, 0.55, dorsalness);
-      col = [lerp(bellyCol[0], dorsal[0], t), lerp(bellyCol[1], dorsal[1], t), lerp(bellyCol[2], dorsal[2], t)];
-      col = [lerp(col[0], dorsalDark[0], (1 - dorsalness) * 0.0 + dorsalness * 0.3),
-             lerp(col[1], dorsalDark[1], dorsalness * 0.3), lerp(col[2], dorsalDark[2], dorsalness * 0.3)];
-    } else {
-      col = [lerp(dorsal[0], dorsalDark[0], 1 - dorsalness), lerp(dorsal[1], dorsalDark[1], 1 - dorsalness), lerp(dorsal[2], dorsalDark[2], 1 - dorsalness)];
-    }
-    ca.fillStyle = `rgb(${col[0] | 0},${col[1] | 0},${col[2] | 0})`;
-    ca.fillRect(x, 0, 1, H);
+    const dn = Math.sin((x / W) * Math.PI);          // 0 at edges (belly), 1 at centre (back)
+    const b = colAt(dn, true), p = colAt(dn, false);
+    cB.fillStyle = `rgb(${b[0] | 0},${b[1] | 0},${b[2] | 0})`; cB.fillRect(x, 0, 1, H);
+    cP.fillStyle = `rgb(${p[0] | 0},${p[1] | 0},${p[2] | 0})`; cP.fillRect(x, 0, 1, H);
   }
   ch.fillStyle = '#202020'; ch.fillRect(0, 0, W, H);
-  cr.fillStyle = '#9a9a9a'; cr.fillRect(0, 0, W, H);   // base fairly rough
+  cr.fillStyle = '#9a9a9a'; cr.fillRect(0, 0, W, H);
 
-  // overlapping scale cells (brick offset)
-  const cols = 38, rows = 78;
-  const sw = W / cols, sh = H / rows;
-  for (let ry = 0; ry < rows; ry++) {
-    for (let cx = -1; cx < cols; cx++) {
-      const ox = (ry % 2) * 0.5;
-      const px = (cx + ox) * sw + sw * 0.5;
-      const py = ry * sh + sh * 0.5;
-      const nx = ((px % W) + W) % W / W;
-      const dorsalness = Math.sin(nx * Math.PI);
-      const big = belly ? lerp(1.5, 1.0, smoothstep(0.0, 0.4, dorsalness)) : 1.0; // belly scutes a touch larger
-      drawScale(ca, ch, cr, px, py, sw * 0.62 * big, sh * 0.7 * big, dorsalness, belly);
-    }
+  // overlapping scale cells (brick offset) — drawn into all four canvases
+  const cols = 38, rows = 40, sw = W / cols, sh = H / rows;
+  for (let ry = 0; ry < rows; ry++) for (let cx = -1; cx < cols; cx++) {
+    const ox = (ry % 2) * 0.5;
+    const px = (cx + ox) * sw + sw * 0.5, py = ry * sh + sh * 0.5;
+    const dn = Math.sin((((px % W) + W) % W / W) * Math.PI);
+    const w = sw * 0.62, h = sh * 0.7;
+    drawScaleAlbedo(cB, px, py, w, h, dn);
+    drawScaleAlbedo(cP, px, py, w, h, dn);
+    drawScaleHeight(ch, px, py, w, h);
+    drawScaleRough(cr, px, py, w, h);
   }
-  // mottling on albedo
-  for (let i = 0; i < 1400; i++) {
+  for (const c of [cB, cP]) for (let i = 0; i < 700; i++) {
     const x = Math.random() * W, y = Math.random() * H, r = 4 + Math.random() * 26;
-    ca.fillStyle = `rgba(0,0,0,${0.015 + Math.random() * 0.03})`;
-    ca.beginPath(); ca.ellipse(x, y, r, r * 0.7, 0, 0, 7); ca.fill();
+    c.fillStyle = `rgba(0,0,0,${0.015 + Math.random() * 0.03})`;
+    c.beginPath(); c.ellipse(x, y, r, r * 0.7, 0, 0, 7); c.fill();
   }
 
   const normal = normalFromHeight(hgt);
-  const map = new THREE.CanvasTexture(alb);
-  const rough = new THREE.CanvasTexture(rgh);
-  map.colorSpace = THREE.SRGBColorSpace; normal.colorSpace = THREE.NoColorSpace; rough.colorSpace = THREE.NoColorSpace;
-  for (const t of [map, normal, rough]) { t.anisotropy = aniso; t.wrapS = t.wrapT = THREE.RepeatWrapping; }
-  return { map, normal, rough };
+  const bellyMap = new THREE.CanvasTexture(albB), plainMap = new THREE.CanvasTexture(albP), rough = new THREE.CanvasTexture(rgh);
+  bellyMap.colorSpace = plainMap.colorSpace = THREE.SRGBColorSpace;
+  normal.colorSpace = rough.colorSpace = THREE.NoColorSpace;
+  for (const t of [bellyMap, plainMap, normal, rough]) { t.anisotropy = aniso; t.wrapS = t.wrapT = THREE.RepeatWrapping; }
+  return { bellyMap, plainMap, normal, rough };
 }
 
-function drawScale(ca, ch, cr, x, y, w, h, dorsalness, belly) {
-  const jl = (Math.random() - 0.5) * 18;
-  // albedo
-  ca.save();
-  ca.translate(x, y);
-  ca.beginPath();
-  scalePath(ca, w, h);
+function drawScaleAlbedo(ca, x, y, w, h, dorsalness) {
+  const jl = (Math.random() - 0.5) * 18 | 0;
+  ca.save(); ca.translate(x, y); ca.beginPath(); scalePath(ca, w, h);
   const g = ca.createLinearGradient(0, -h / 2, 0, h / 2);
   g.addColorStop(0, `rgba(255,255,255,${0.10 + dorsalness * 0.06})`);
   g.addColorStop(0.5, `rgba(${128 + jl},${128 + jl},${110 + jl},0)`);
@@ -423,15 +429,17 @@ function drawScale(ca, ch, cr, x, y, w, h, dorsalness, belly) {
   ca.fillStyle = g; ca.fill();
   ca.lineWidth = 1.2; ca.strokeStyle = 'rgba(8,18,12,0.5)'; ca.stroke();
   ca.restore();
-  // height (radial bump)
+}
+function drawScaleHeight(ch, x, y, w, h) {
   ch.save(); ch.translate(x, y); ch.beginPath(); scalePath(ch, w, h);
   const gh = ch.createRadialGradient(0, -h * 0.1, 1, 0, 0, Math.max(w, h) * 0.6);
   gh.addColorStop(0, '#d8d8d8'); gh.addColorStop(0.75, '#888'); gh.addColorStop(1, '#2c2c2c');
   ch.fillStyle = gh; ch.fill(); ch.restore();
-  // roughness: scale interiors glossier, rims rougher
+}
+function drawScaleRough(cr, x, y, w, h) {
   cr.save(); cr.translate(x, y); cr.beginPath(); scalePath(cr, w, h);
-  cr.fillStyle = belly ? '#b0b0b0' : '#6f6f6f'; cr.fill();
-  cr.lineWidth = 2; cr.strokeStyle = '#c8c8c8'; cr.stroke(); cr.restore();
+  cr.fillStyle = '#8a8a8a'; cr.fill();                 // interiors a touch glossier
+  cr.lineWidth = 2; cr.strokeStyle = '#c8c8c8'; cr.stroke(); cr.restore();  // rougher rims
 }
 function scalePath(c, w, h) {
   // teardrop / rounded-bottom scale
@@ -757,16 +765,19 @@ function buildLegs(spine, skinMat, clawMat) {
     const g = new THREE.Group();
     const rx = d.root.x + d.side * 0.85;
     const rz = d.root.z + (d.front ? -0.1 : 0.15);
-    g.position.set(0, 0, 0);
-    dragon.add(g);
 
-    // joint chain in world-ish dragon space, feet at y≈0
+    // hip joint = the group's pivot; the rest of the chain is built relative to it
+    // so leg rotation swings about the hip (not the world origin), keeping feet planted.
     const top = new THREE.Vector3(rx, d.root.y - 0.2, rz);
-    const knee = new THREE.Vector3(rx + d.side * 0.25, d.root.y * 0.5, rz + (d.front ? 0.25 : -0.35));
-    const ankle = new THREE.Vector3(rx + d.side * 0.15, 0.45, rz + (d.front ? 0.1 : 0.15));
-    const foot = new THREE.Vector3(rx + d.side * 0.1, 0.06, rz + (d.front ? 0.45 : 0.4));
+    g.position.copy(top);
+    dragon.add(g);
+    const rel = v => v.sub(top);                       // → hip-local space
+    const hip = new THREE.Vector3(0, 0, 0);
+    const knee = rel(new THREE.Vector3(rx + d.side * 0.25, d.root.y * 0.5, rz + (d.front ? 0.25 : -0.35)));
+    const ankle = rel(new THREE.Vector3(rx + d.side * 0.15, 0.45, rz + (d.front ? 0.1 : 0.15)));
+    const foot = rel(new THREE.Vector3(rx + d.side * 0.1, 0.06, rz + (d.front ? 0.45 : 0.4)));
 
-    const limbCurve = new THREE.CatmullRomCurve3([top, knee, ankle, foot]);
+    const limbCurve = new THREE.CatmullRomCurve3([hip, knee, ankle, foot]);
     const lg = sweepGeometry(limbCurve, 28, 12, (s, th) => {
       const r = profileAt([[0, 0.34], [0.4, 0.26], [0.7, 0.18], [1, 0.14]], s);
       return { x: Math.cos(th) * r, y: Math.sin(th) * r, r };
@@ -786,7 +797,7 @@ function buildLegs(spine, skinMat, clawMat) {
       claw.castShadow = true; g.add(claw);
     }
 
-    g.userData = { rest: g.rotation.clone(), pivot: top.clone(), phase: d.front ? 0 : Math.PI, side: d.side };
+    g.userData = { rest: g.rotation.clone(), phase: d.front ? 0 : Math.PI, side: d.side };
     legs.push(g);
   }
 }
@@ -840,7 +851,9 @@ function buildFire() {
   const points = new THREE.Points(geo, mat);
   points.frustumCulled = false;
   scene.add(points);
-  fire = { points, geo, pos, col, MAX, parts: [], head: 0 };
+  // pre-allocated particle pool (reused objects + reused Vector3s, zero per-frame allocation)
+  fire = { points, geo, pos, col, MAX, pool: [], count: 0 };
+  for (let i = 0; i < MAX; i++) fire.pool.push({ p: new THREE.Vector3(), v: new THREE.Vector3(), life: 0, max: 1 });
 }
 function makeFireSprite() {
   const S = 64; const cv = document.createElement('canvas'); cv.width = cv.height = S;
@@ -852,24 +865,32 @@ function makeFireSprite() {
   const t = new THREE.CanvasTexture(cv); return t;
 }
 function emitFire(n, origin, dir) {
-  for (let i = 0; i < n && fire.parts.length < fire.MAX; i++) {
-    const v = dir.clone().multiplyScalar(3.2 + Math.random() * 2.5)
-      .add(new THREE.Vector3((Math.random() - 0.5) * 1.2, (Math.random() - 0.5) * 1.2, (Math.random() - 0.5) * 1.2));
-    fire.parts.push({ p: origin.clone(), v, life: 1, max: 0.5 + Math.random() * 0.5 });
+  for (let i = 0; i < n && fire.count < fire.MAX; i++) {
+    const q = fire.pool[fire.count++];
+    q.p.copy(origin);
+    q.v.copy(dir).multiplyScalar(3.2 + Math.random() * 2.5);
+    q.v.x += (Math.random() - 0.5) * 1.2;
+    q.v.y += (Math.random() - 0.5) * 1.2;
+    q.v.z += (Math.random() - 0.5) * 1.2;
+    q.life = 1; q.max = 0.5 + Math.random() * 0.5;
   }
 }
 function updateFire(dt) {
-  const P = fire.parts;
-  for (let i = P.length - 1; i >= 0; i--) {
-    const q = P[i];
+  for (let i = fire.count - 1; i >= 0; i--) {
+    const q = fire.pool[i];
     q.life -= dt / q.max;
-    if (q.life <= 0) { P.splice(i, 1); continue; }
+    if (q.life <= 0) {                               // swap-remove (pool order doesn't matter)
+      fire.pool[i] = fire.pool[fire.count - 1];
+      fire.pool[fire.count - 1] = q;
+      fire.count--;
+      continue;
+    }
     q.p.addScaledVector(q.v, dt);
     q.v.multiplyScalar(0.92); q.v.y += dt * 1.5;     // rise as it cools
   }
-  const n = Math.min(P.length, fire.MAX);
+  const n = fire.count;
   for (let i = 0; i < n; i++) {
-    const q = P[i];
+    const q = fire.pool[i];
     fire.pos[i * 3] = q.p.x; fire.pos[i * 3 + 1] = q.p.y; fire.pos[i * 3 + 2] = q.p.z;
     const lf = q.life;
     let r, g, b;
@@ -924,7 +945,7 @@ function tick() {
 
   // fire
   let target = 0;
-  if (fireState.on) { target = 1; if (t > fireState.until) fireState.on = false; }
+  if (fireState.on) { target = 1; fireState.timer -= dt; if (fireState.timer <= 0) fireState.on = false; }
   fireState.power = THREE.MathUtils.damp(fireState.power, target, 6, dt);
   if (jawPivot) jawPivot.rotation.x = fireState.power * 0.5;
   if (mouthLight) mouthLight.intensity = fireState.power * (6 + Math.sin(t * 40) * 2.5);
